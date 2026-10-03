@@ -1,0 +1,78 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: order-tracker-errors
+    folder: Order Tracker
+    interval: 1m
+    rules:
+      - uid: order-lookup-5xx
+        title: Order lookup 5xx responses
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              editorMode: code
+              expr: sum(increase(order_lookup_requests_total{http_response_status_code=~"5.."}[5m])) or vector(0)
+              hide: false
+              instant: true
+              intervalMs: 1000
+              legendFormat: __auto
+              maxDataPoints: 43200
+              range: false
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              refId: B
+              type: reduce
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        dashboardUid: order-tracker-requests
+        panelId: 2
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        annotations:
+          summary: "A 5xx response was recorded by GET /api/orders/{order_id} within the last 5 minutes."
+          description: "The alert evaluates the total number of 5xx order lookup responses over a rolling 5-minute window. Dashboard: http://localhost:3000/d/order-tracker-requests/order-tracker-requests?viewPanel=2"
+          endpoint: "GET /api/orders/{order_id}"
+          time_window: "5m rolling window; evaluated every 1m"
+          dashboard_url: "http://localhost:3000/d/order-tracker-requests/order-tracker-requests?viewPanel=2"
+        labels:
+          service: order-tracker
+          severity: warning

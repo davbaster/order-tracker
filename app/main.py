@@ -5,13 +5,51 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from opentelemetry import metrics, trace
+from opentelemetry._logs import set_logger_provider
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+import logging
 
 
 DB_PATH = Path(os.getenv("ORDER_DB_PATH", "data/orders.db"))
 STATUSES = {"received", "preparing", "shipped", "delivered"}
+
+resource = Resource.create({"service.name": "order-tracker"})
+tracer_provider = TracerProvider(resource=resource)
+tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+trace.set_tracer_provider(tracer_provider)
+tracer = trace.get_tracer(__name__)
+
+metric_reader = PeriodicExportingMetricReader(
+    OTLPMetricExporter(), export_interval_millis=5000
+)
+meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
+metrics.set_meter_provider(meter_provider)
+lookup_requests = metrics.get_meter(__name__).create_counter(
+    "order_lookup_requests",
+    description="Number of order lookup HTTP requests",
+    unit="{request}",
+)
+
+logger_provider = LoggerProvider(resource=resource)
+logger_provider.add_log_record_processor(BatchLogRecordProcessor(OTLPLogExporter()))
+set_logger_provider(logger_provider)
+lookup_logger = logging.getLogger("order_tracker.lookups")
+lookup_logger.addHandler(LoggingHandler(level=logging.INFO, logger_provider=logger_provider))
+lookup_logger.setLevel(logging.INFO)
+lookup_logger.propagate = False
 
 
 def connect():
@@ -79,6 +117,18 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Order Tracker", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def record_order_lookup_request(request: Request, call_next):
+    response = await call_next(request)
+    route = getattr(request.scope.get("route"), "path", None)
+    if route == "/api/orders/{order_id}":
+        lookup_requests.add(
+            1,
+            {"http.route": route, "http.response.status_code": response.status_code},
+        )
+    return response
+
+
 @app.get("/")
 def index():
     return FileResponse(Path(__file__).parent.parent / "static" / "index.html")
@@ -100,11 +150,25 @@ def list_orders():
 
 @app.get("/api/orders/{order_id}")
 def get_order(order_id: str):
-    with connect() as db:
-        row = db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
-    if row is None:
-        raise HTTPException(404, "Order not found")
-    return order_detail(row)
+    with tracer.start_as_current_span("order.lookup") as span:
+        span.set_attribute("http.route", "/api/orders/{order_id}")
+        span.set_attribute("order.id", order_id)
+        with connect() as db:
+            row = db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+        status_code = 404 if row is None else 200
+        span.set_attribute("http.response.status_code", status_code)
+        lookup_logger.info(
+            "Order lookup completed",
+            extra={
+                "http.route": "/api/orders/{order_id}",
+                "http.response.status_code": status_code,
+                "order.id": order_id,
+                "order.found": row is not None,
+            },
+        )
+        if row is None:
+            raise HTTPException(404, "Order not found")
+        return order_detail(row)
 
 
 @app.post("/api/orders", status_code=201)
