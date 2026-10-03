@@ -17,7 +17,7 @@
       "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
       "targets": [
         {
-          "expr": "sum by (http_response_status_code) (rate(order_lookup_requests_total[5m]))",
+          "expr": "sum by (http_response_status_code) (rate(order_lookup_requests_total[5m])) > 0",
           "legendFormat": "HTTP {{http_response_status_code}}",
           "refId": "A"
         }
@@ -34,13 +34,13 @@
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Lookup errors per second (4xx and 5xx)",
+      "title": "5xx lookup responses per second",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
       "targets": [
         {
-          "expr": "sum by (http_response_status_code) (rate(order_lookup_requests_total{http_response_status_code=~\"4..|5..\"}[5m]))",
-          "legendFormat": "HTTP {{http_response_status_code}}",
+          "expr": "sum(rate(order_lookup_requests_total{http_response_status_code=~\"5..\"}[5m])) or vector(0)",
+          "legendFormat": "5xx responses",
           "refId": "A"
         }
       ],

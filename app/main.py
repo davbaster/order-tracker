@@ -110,6 +110,14 @@ class StatusUpdate(BaseModel):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    for status_code in range(500, 600):
+        lookup_requests.add(
+            0,
+            {
+                "http.route": "/api/orders/{order_id}",
+                "http.response.status_code": status_code,
+            },
+        )
     init_db()
     yield
 
@@ -119,7 +127,16 @@ app = FastAPI(title="Order Tracker", lifespan=lifespan)
 
 @app.middleware("http")
 async def record_order_lookup_request(request: Request, call_next):
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception:
+        route = getattr(request.scope.get("route"), "path", None)
+        if route == "/api/orders/{order_id}":
+            lookup_requests.add(
+                1,
+                {"http.route": route, "http.response.status_code": 500},
+            )
+        raise
     route = getattr(request.scope.get("route"), "path", None)
     if route == "/api/orders/{order_id}":
         lookup_requests.add(
@@ -155,7 +172,27 @@ def get_order(order_id: str):
         span.set_attribute("order.id", order_id)
         with connect() as db:
             row = db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
-        status_code = 404 if row is None else 200
+        if row is None:
+            status_code = 404
+            order = None
+        else:
+            try:
+                order = order_detail(row)
+                status_code = 200
+            except Exception:
+                status_code = 500
+                span.set_status(trace.Status(trace.StatusCode.ERROR, "Order lookup failed"))
+                span.set_attribute("http.response.status_code", status_code)
+                lookup_logger.exception(
+                    "Order lookup failed",
+                    extra={
+                        "http.route": "/api/orders/{order_id}",
+                        "http.response.status_code": status_code,
+                        "order.id": order_id,
+                        "order.found": True,
+                    },
+                )
+                raise
         span.set_attribute("http.response.status_code", status_code)
         lookup_logger.info(
             "Order lookup completed",
@@ -166,9 +203,9 @@ def get_order(order_id: str):
                 "order.found": row is not None,
             },
         )
-        if row is None:
-            raise HTTPException(404, "Order not found")
-        return order_detail(row)
+    if row is None:
+        raise HTTPException(404, "Order not found")
+    return order
 
 
 @app.post("/api/orders", status_code=201)
