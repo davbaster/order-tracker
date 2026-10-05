@@ -60,6 +60,27 @@ Telemetry is stored in Docker volumes for Prometheus, Loki, Tempo, and Grafana. 
 
 Grafana sends firing and resolved notifications to the local incident responder at `POST /alerts` on port `8001`. The responder stores each alert under `incident-response/incidents/` with alert labels and annotations, the affected endpoint, dashboard links, nearby Loki logs, a Tempo trace search, and the assistant output. These files are local runtime data and are ignored by Git.
 
+```mermaid
+flowchart TD
+    A[Grafana alert] --> B[Responder receives POST /alerts]
+    B --> C[Save alert and collect evidence]
+    C --> D[Loki logs]
+    C --> E[Tempo traces]
+    D --> F[Save incident.json]
+    E --> F
+    F --> G{Test or resolved alert?}
+    G -- Yes --> H[Skip code changes and record why]
+    G -- No, firing alert --> I[Start Codex headless]
+    I --> J{Small, clear, low-risk bug?}
+    J -- Yes --> K[Apply a focused fix]
+    J -- No or unsure --> L[Write CALL_ONCALL_ENGINEER.txt]
+    I -- Launch or run failure --> L
+    K --> M[Save result in assistant.log]
+    L --> M
+```
+
+Each alert's files are grouped in its own folder under `incident-response/incidents/`.
+
 Run the responder on the host so it can use the installed Codex CLI and read this checkout:
 
 ```powershell
